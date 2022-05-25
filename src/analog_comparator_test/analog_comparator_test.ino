@@ -1,96 +1,148 @@
-#include<avr/io.h>           // AVR/IO.H header file
+#include <avr/io.h> // AVR/IO.H header file
 #include <avr/wdt.h>
 
 //#define F_CPU 16000000UL     // Setting CPU Frequency 16MHz
-#define COMPARATOR_REG              ACSR
-#define DATAIN                  ACO
-#define INPUT_IS_SET            ( bit_is_set( COMPARATOR_REG, DATAIN ) )
-#define INPUT_IS_CLEAR          ( bit_is_clear( COMPARATOR_REG, DATAIN ) )
-#define BIT_1_HOLD_ON_LENGTH        40 //20*2
-#define BIT_0_HOLD_ON_LENGTH        64 //33*2
+#define COMPARATOR_REG ACSR
+#define DATAIN ACO
+#define INPUT_IS_SET (bit_is_set(COMPARATOR_REG, DATAIN))
+#define INPUT_IS_CLEAR (bit_is_clear(COMPARATOR_REG, DATAIN))
+#define BIT_1_HOLD_ON_LENGTH 40 // 20 us * 2 counts / us
+#define BIT_0_HOLD_ON_LENGTH 64 // 33 us * 2 counts / us
+#define START_HOLD_ON_LENGTH 80 // 150 us * 2 counts / us
+#define BUFFER_SIZE 25
+#define DATA_SIZE_MAX 15
 
-static bool         ParityBit;
-static bool         Broadcast;
-static word         MasterAddress;
-static word         SlaveAddress;
-static byte         Control;
-static byte         DataSize;
-static byte         Data[ 256 ];
+static bool ParityBit;
+static bool Broadcast;
+static word MasterAddress;
+static word SlaveAddress;
+static byte Control;
+static byte DataSize;
+static byte Data[DATA_SIZE_MAX];
 
-void setup() {
-  // put your setup code here, to run once:
-  DDRB = 0x21;               // Bit 0 as output
-  PORTB = 0x00;              // Clear all bits
-  ACSR = 0x00;               // Clear bits of ACSR 
-  ADCSRB = 0x00;             // Clear bits of ADCSRB
+struct AVCMessage
+{
+    bool ParityBit;
+    bool Broadcast;
+    word MasterAddress;
+    word SlaveAddress;
+    byte Control;
+    byte DataSize;
+    byte Data[DATA_SIZE_MAX];
+};
 
-  // Watchdog timer enable
-  wdt_enable( WDTO_2S );
-  // Timer 0 prescaler = 8 
-  // (16e6 cycles/second) / (8 cycles/count)  / (1e6 us/second)
-  //   = ( 2 count / us )
-  TCCR0B = _BV(CS01);
+byte buffer_ptr = 0;
+AVCMessage buffer[BUFFER_SIZE];
 
-  //Logging
-  Serial.begin(115200);
-  Serial.println("Setup started :");
-  delay(250);
-  Serial.println("Finished setup.");
+void setup()
+{
+    DDRB = 0x21;   // Bit 0 as output
+    PORTB = 0x00;  // Clear all bits
+    ACSR = 0x00;   // Clear bits of ACSR
+    ADCSRB = 0x00; // Clear bits of ADCSRB
+
+    // Watchdog timer enable
+    wdt_enable(WDTO_2S);
+    // Timer 0 prescaler = 8
+    // (16e6 cycles/second) / (8 cycles/count)  / (1e6 us/second)
+    //   = ( 2 count / us )
+    TCCR0B = _BV(CS01);
+
+    // Logging
+    Serial.begin(115200);
+    Serial.println("Setup started:");
+    delay(250);
+    Serial.println("Finished setup. Collecting data...");
 }
 
-void loop() {
-  // put your main code here, to run repeatedly:
-//  if( (ACSR & 0x20) == 0)    // Check ACO (output bit)
-//  {
-//    PORTB = 0x21;            // Turn on LED1
-//  } 
-//  else 
-//  {
-//    PORTB = 0x00;            // Turn off LED1
-//  }
-  wdt_reset();
-  bool valid = AvcReadMessage();
-  bool condition = (MasterAddress == 272 && SlaveAddress == 454) ||
-                   (MasterAddress == 454 && SlaveAddress == 272);
-  if (valid && condition) {
-  //lif (valid) {
-    Serial.print(MasterAddress);
-    Serial.print(' ');
-    Serial.print(SlaveAddress);
-    Serial.print(' ');
-    Serial.print(Control);
-    Serial.print('{');
-    for(int i = 0; i < DataSize; i++) {
-      Serial.print(Data[i]);
-      Serial.print(' ');
+AVCMessage msg;
+void loop()
+{
+    wdt_reset();
+    bool valid = AvcReadMessage();
+    // bool valid = true;
+    bool condition = (MasterAddress == 272 && SlaveAddress == 454) ||
+                     (MasterAddress == 454 && SlaveAddress == 272);
+    if (valid & condition)
+    {
+        // make a new AVC message
+        buffer[buffer_ptr].MasterAddress = MasterAddress;
+        buffer[buffer_ptr].SlaveAddress = SlaveAddress;
+        buffer[buffer_ptr].Control = Control;
+        buffer[buffer_ptr].DataSize = DataSize;
+        for (int i = 0; i < DataSize; i++)
+        {
+            buffer[buffer_ptr].Data[i] = Data[i];
+        }
+        buffer_ptr += 1;
     }
-    Serial.println('}');
-    Serial.println("---------");
-  }
+
+    if (buffer_ptr == BUFFER_SIZE)
+    {
+        Serial.println("----------Data dump----------");
+        for (int j = 0; j < BUFFER_SIZE; j++)
+        {
+            AVCMessage message = buffer[j];
+            Serial.print(message.MasterAddress);
+            Serial.print(' ');
+            Serial.print(message.SlaveAddress);
+            Serial.print(' ');
+            Serial.print(message.Control);
+            Serial.print('{');
+            for (int i = 0; i < message.DataSize; i++)
+            {
+                Serial.print(message.Data[i]);
+                Serial.print(' ');
+            }
+            Serial.println('}');
+        }
+        Serial.println("-----------------------------");
+        buffer_ptr = 0;
+    }
 }
 
-inline void LedOn ( void )
+inline void LedOn(void)
 {
     PORTB |= 0x20;
 }
-inline void LedOff ( void )
+inline void LedOff(void)
 {
     PORTB &= ~0x20;
 }
 
-word ReadBits ( byte nbBits )
+// Waits until a valid start bit
+bool getStart()
+{
+    // wait until the signal goes high
+    while (INPUT_IS_CLEAR)
+    {
+        wdt_reset();
+    }
+    TCNT0 = 0; // start the count
+    while (INPUT_IS_SET)
+        ; // wait for the signal to go low
+    // check how long the level was held high
+    if (TCNT0 > START_HOLD_ON_LENGTH)
+    {
+        // found valid start, continue
+        return true;
+    }
+    return false;
+}
+
+word ReadBits(byte nbBits)
 {
     word data = 0;
 
     ParityBit = 0;
 
-    while ( nbBits-- > 0 )
+    while (nbBits-- > 0)
     {
         // Insert new bit
         data <<= 1;
 
         // Wait until rising edge of new bit.
-        while ( INPUT_IS_CLEAR )
+        while (INPUT_IS_CLEAR)
         {
             // Reset watchdog.
             wdt_reset();
@@ -100,144 +152,146 @@ word ReadBits ( byte nbBits )
         TCNT0 = 0;
 
         // Wait until falling edge.
-        while ( INPUT_IS_SET );
+        while (INPUT_IS_SET)
+            ;
 
         // Compare half way between a '1' (20 us) and a '0' (32 us ): 32 - (32 - 20) /2 = 26 us
-        if ( TCNT0 < BIT_0_HOLD_ON_LENGTH - (BIT_0_HOLD_ON_LENGTH - BIT_1_HOLD_ON_LENGTH) / 2 )
+        if (TCNT0 < BIT_0_HOLD_ON_LENGTH - (BIT_0_HOLD_ON_LENGTH - BIT_1_HOLD_ON_LENGTH) / 2)
         {
             // Set new bit.
             data |= 0x0001;
 
             // Adjust parity.
-            ParityBit = ! ParityBit;
+            ParityBit = !ParityBit;
         }
     }
 
     return data;
 }
 
-bool AvcReadMessage ( void )
+bool AvcReadMessage(void)
 {
-    ReadBits( 1 ); // Start bit.
+    while (!getStart())
+        ; // wait for a valid start bit
 
     LedOn();
 
-    Broadcast = ReadBits( 1 );
+    Broadcast = ReadBits(1);
 
-    MasterAddress = ReadBits( 12 );
+    MasterAddress = ReadBits(12);
     bool p = ParityBit;
-    if ( p != ReadBits( 1 ) )
+    if (p != ReadBits(1))
     {
-        //UsartPutCStr( PSTR("AvcReadMessage: Parity error @ MasterAddress!\r\n") );
-        //Serial.println("Parity Error # MasterAddress");
+        // UsartPutCStr( PSTR("AvcReadMessage: Parity error @ MasterAddress!\r\n") );
+        // Serial.println("Parity Error # MasterAddress");
         return false;
-        //return (AvcActionID)FALSE;
+        // return (AvcActionID)FALSE;
     }
 
-    SlaveAddress = ReadBits( 12 );
+    SlaveAddress = ReadBits(12);
     p = ParityBit;
-    if ( p != ReadBits( 1 ) )
+    if (p != ReadBits(1))
     {
-        //UsartPutCStr( PSTR("AvcReadMessage: Parity error @ SlaveAddress!\r\n") );
-        //Serial.println("Parity error @ SlaveAddress");
+        // UsartPutCStr( PSTR("AvcReadMessage: Parity error @ SlaveAddress!\r\n") );
+        // Serial.println("Parity error @ SlaveAddress");
         return false;
-        //return (AvcActionID)FALSE;
+        // return (AvcActionID)FALSE;
     }
 
-    //bool forMe = ( SlaveAddress == MY_ADDRESS );
+    // bool forMe = ( SlaveAddress == MY_ADDRESS );
     bool forMe = false;
 
     // In point-to-point communication, sender issues an ack bit with value '1' (20us). Receiver
     // upon acking will extend the bit until it looks like a '0' (32us) on the bus. In broadcast
     // mode, receiver disregards the bit.
 
-    if ( forMe )
+    if (forMe)
     {
         // Send ACK.
-        //Send1BitWord( 0 );
+        // Send1BitWord( 0 );
     }
     else
     {
-        ReadBits( 1 );
+        ReadBits(1);
     }
 
-    Control = ReadBits( 4 );
+    Control = ReadBits(4);
     p = ParityBit;
-    if ( p != ReadBits( 1 ) )
+    if (p != ReadBits(1))
     {
-        //UsartPutCStr( PSTR("AvcReadMessage: Parity error @ Control!\r\n") );
-        //Serial.println("Parity error @ Control");
+        // UsartPutCStr( PSTR("AvcReadMessage: Parity error @ Control!\r\n") );
+        // Serial.println("Parity error @ Control");
         return false;
-        //return (AvcActionID)FALSE;
+        // return (AvcActionID)FALSE;
     }
 
-    if ( forMe )
+    if (forMe)
     {
         // Send ACK.
-        //Send1BitWord( 0 );
+        // Send1BitWord( 0 );
     }
     else
     {
-        ReadBits( 1 );
+        ReadBits(1);
     }
 
-    DataSize = ReadBits( 8 );
+    DataSize = ReadBits(8);
     p = ParityBit;
-    if ( p != ReadBits( 1 ) )
+    if (p != ReadBits(1) || DataSize > DATA_SIZE_MAX)
     {
-        //UsartPutCStr( PSTR("AvcReadMessage: Parity error @ DataSize!\r\n") );
-        //Serial.println("Parity error @ DataSize");
+        // UsartPutCStr( PSTR("AvcReadMessage: Parity error @ DataSize!\r\n") );
+        // Serial.println("Parity error @ DataSize");
         return false;
-        //return (AvcActionID)FALSE;
+        // return (AvcActionID)FALSE;
     }
 
-    if ( forMe )
+    if (forMe)
     {
         // Send ACK.
-        //Send1BitWord( 0 );
+        // Send1BitWord( 0 );
     }
     else
     {
-        ReadBits( 1 );
+        ReadBits(1);
     }
 
     byte i;
 
-    for ( i = 0; i < DataSize; i++ )
+    for (i = 0; i < DataSize; i++)
     {
-        Data[i] = ReadBits( 8 );
+        Data[i] = ReadBits(8);
         p = ParityBit;
-        if ( p != ReadBits( 1 ) )
+        if (p != ReadBits(1))
         {
-            //sprintf( UsartMsgBuffer, "AvcReadMessage: Parity error @ Data[%d]\r\n", i );
-            //Serial.println("Parity error @ Data");
+            // sprintf( UsartMsgBuffer, "AvcReadMessage: Parity error @ Data[%d]\r\n", i );
+            // Serial.println("Parity error @ Data");
             return false;
-            //UsartPutStr( UsartMsgBuffer );
-            //return (AvcActionID)FALSE;
+            // UsartPutStr( UsartMsgBuffer );
+            // return (AvcActionID)FALSE;
         }
 
-        if ( forMe )
+        if (forMe)
         {
             // Send ACK.
-            //Send1BitWord( 0 );
+            // Send1BitWord( 0 );
         }
         else
         {
-            ReadBits( 1 );
+            ReadBits(1);
         }
     }
 
     // Dump message on terminal.
-    //if ( forMe ) UsartPutCStr( PSTR("AvcReadMessage: This message is for me!\r\n") );
+    // if ( forMe ) UsartPutCStr( PSTR("AvcReadMessage: This message is for me!\r\n") );
 
-    //AvcActionID actionID = GetActionID();
+    // AvcActionID actionID = GetActionID();
 
     // switch ( actionID ) {
     //   case /* value */:
     // }
-    //DumpRawMessage( FALSE );
+    // DumpRawMessage( FALSE );
 
     LedOff();
     return true;
-    //return actionID;
+    // return actionID;
 }
