@@ -1,0 +1,6 @@
+{
+    "sketch": "analog_comparator_test.ino",
+    "board": "arduino:avr:uno",
+    "port": "/dev/tty.usbmodem11401",
+    "programmer": "arduino:avrisp"
+}
