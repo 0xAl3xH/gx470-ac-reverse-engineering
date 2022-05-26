@@ -1,14 +1,15 @@
 #include <avr/io.h> // AVR/IO.H header file
 #include <avr/wdt.h>
+#include <avr/interrupt.h>
 
 //#define F_CPU 16000000UL     // Setting CPU Frequency 16MHz
 #define COMPARATOR_REG ACSR
 #define DATAIN ACO
 #define INPUT_IS_SET (bit_is_set(COMPARATOR_REG, DATAIN))
 #define INPUT_IS_CLEAR (bit_is_clear(COMPARATOR_REG, DATAIN))
-#define BIT_1_HOLD_ON_LENGTH 40 // 20 us * 2 counts / us
-#define BIT_0_HOLD_ON_LENGTH 64 // 33 us * 2 counts / us
-#define START_HOLD_ON_LENGTH 80 // 150 us * 2 counts / us
+#define BIT_1_HOLD_ON_LENGTH 40  // 20 us * 2 counts / us
+#define BIT_0_HOLD_ON_LENGTH 64  // 33 us * 2 counts / us
+#define START_HOLD_ON_LENGTH 320 // 160 us * 2 counts / us
 #define BUFFER_SIZE 25
 #define DATA_SIZE_MAX 15
 
@@ -43,10 +44,11 @@ void setup()
 
     // Watchdog timer enable
     wdt_enable(WDTO_2S);
-    // Timer 0 prescaler = 8
+    // Timer 1 prescaler = 8
     // (16e6 cycles/second) / (8 cycles/count)  / (1e6 us/second)
     //   = ( 2 count / us )
-    TCCR0B = _BV(CS01);
+    TCCR1A = 0; // must explicitly set this to 0 since it's set to some other value behind the scenes in Arduino's init()
+    TCCR1B = _BV(CS11);
 
     // Logging
     Serial.begin(115200);
@@ -55,7 +57,7 @@ void setup()
     Serial.println("Finished setup. Collecting data...");
 }
 
-AVCMessage msg;
+AVCMessage *msg;
 void loop()
 {
     wdt_reset();
@@ -65,14 +67,16 @@ void loop()
                      (MasterAddress == 454 && SlaveAddress == 272);
     if (valid & condition)
     {
-        // make a new AVC message
-        buffer[buffer_ptr].MasterAddress = MasterAddress;
-        buffer[buffer_ptr].SlaveAddress = SlaveAddress;
-        buffer[buffer_ptr].Control = Control;
-        buffer[buffer_ptr].DataSize = DataSize;
+        // record the AVC message in our buffer
+        msg = &buffer[buffer_ptr];
+        // Serial.println(msg.MasterAddress);
+        msg->MasterAddress = MasterAddress;
+        msg->SlaveAddress = SlaveAddress;
+        msg->Control = Control;
+        msg->DataSize = DataSize;
         for (int i = 0; i < DataSize; i++)
         {
-            buffer[buffer_ptr].Data[i] = Data[i];
+            msg->Data[i] = Data[i];
         }
         buffer_ptr += 1;
     }
@@ -118,11 +122,13 @@ bool getStart()
     {
         wdt_reset();
     }
-    TCNT0 = 0; // start the count
+    TCNT1 = 0; // start the count
     while (INPUT_IS_SET)
-        ; // wait for the signal to go low
+    {
+        // wait for the signal to go low
+    }
     // check how long the level was held high
-    if (TCNT0 > START_HOLD_ON_LENGTH)
+    if (TCNT1 > START_HOLD_ON_LENGTH)
     {
         // found valid start, continue
         return true;
@@ -149,14 +155,14 @@ word ReadBits(byte nbBits)
         }
 
         // Reset timer to measure bit length.
-        TCNT0 = 0;
+        TCNT1 = 0;
 
         // Wait until falling edge.
         while (INPUT_IS_SET)
             ;
 
         // Compare half way between a '1' (20 us) and a '0' (32 us ): 32 - (32 - 20) /2 = 26 us
-        if (TCNT0 < BIT_0_HOLD_ON_LENGTH - (BIT_0_HOLD_ON_LENGTH - BIT_1_HOLD_ON_LENGTH) / 2)
+        if (TCNT1 < BIT_0_HOLD_ON_LENGTH - (BIT_0_HOLD_ON_LENGTH - BIT_1_HOLD_ON_LENGTH) / 2)
         {
             // Set new bit.
             data |= 0x0001;
@@ -172,7 +178,9 @@ word ReadBits(byte nbBits)
 bool AvcReadMessage(void)
 {
     while (!getStart())
-        ; // wait for a valid start bit
+    {
+        // wait for a valid start bit
+    }
 
     LedOn();
 
